@@ -18,6 +18,7 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <dirent.h>
 
 namespace spdlog {
 namespace sinks {
@@ -127,7 +128,6 @@ public:
         , file_helper_{event_handlers}
         , truncate_(truncate)
         , max_files_(max_files)
-        , filenames_q_()
     {
         if (rotation_hour < 0 || rotation_hour > 23 || rotation_minute < 0 || rotation_minute > 59)
         {
@@ -141,7 +141,7 @@ public:
 
         if (max_files_ > 0)
         {
-            init_filenames_q_();
+            remove_obsolete_logs_();
         }
     }
 
@@ -169,7 +169,7 @@ protected:
         // Do the cleaning only at the end because it might throw on failure.
         if (should_rotate && max_files_ > 0)
         {
-            delete_old_();
+            delete_old_(time);
         }
     }
 
@@ -179,27 +179,69 @@ protected:
     }
 
 private:
-    void init_filenames_q_()
+    void remove_obsolete_logs_()
     {
         using details::os::path_exists;
+        using details::os::iterate_dir;
+        using details::os::remove_if_exists;
 
-        filenames_q_ = details::circular_q<filename_t>(static_cast<size_t>(max_files_));
-        std::vector<filename_t> filenames;
-        auto now = log_clock::now();
-        while (filenames.size() < max_files_)
+        filename_t folder = details::os::dir_name(base_filename_);
+        const filename_t sep {details::os::folder_seps_filename};
+        filename_t basename = base_filename_.substr(folder.size());
+        if (basename.find(sep) == 0)
         {
-            auto filename = FileNameCalc::calc_filename(base_filename_, now_tm(now));
-            if (!path_exists(filename))
+            folder += sep;
+            basename = basename.substr(sep.size());
+        }
+        filename_t prefix, ext;
+        std::tie(prefix, ext) = details::file_helper::split_by_extension(basename);
+
+        prefix += '_';
+        if (folder.empty())
+        {
+            folder = ".";
+        }
+
+        static constexpr std::size_t suffix_size = 11; // _YYYY-mm-dd
+        const std::size_t target_size = basename.size() + suffix_size;
+
+        const auto is_daily_log = [&](const filename_t &filename)
+        {
+            if (filename.size() == target_size && filename.find(prefix) == 0 && filename.rfind(ext) == filename.size() - ext.size())
             {
-                break;
+                // TODO: Check for valid day/month/year values, or better way to validate the date?
+                static constexpr int is_separator[] {0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0};
+                const auto *itr = std::begin(is_separator);
+
+                return std::all_of(
+                    begin(filename) + static_cast<filename_t::difference_type>(prefix.size()),
+                    end(filename) - static_cast<filename_t::difference_type>(ext.size()),
+                    [&itr](char chr)
+                    {
+                        if (*itr++ != 0)
+                        {
+                            return chr == '-';
+                        }
+                        return std::isdigit(chr) != 0;
+                    });
             }
-            filenames.emplace_back(filename);
-            now -= std::chrono::hours(24);
-        }
-        for (auto iter = filenames.rbegin(); iter != filenames.rend(); ++iter)
-        {
-            filenames_q_.push_back(std::move(*iter));
-        }
+            return false;
+        };
+
+        const tm cutoff_tm = now_tm(cutoff_tp_(log_clock::now()));
+        const filename_t cutoff_filename = FileNameCalc::calc_filename(basename, cutoff_tm);
+        const filename_t cutoff_date = cutoff_filename.substr(prefix.size(), suffix_size - 1);
+
+        iterate_dir(folder, [&](const filename_t &filename) {
+            if (is_daily_log(filename))
+            {
+                const filename_t current_date = filename.substr(prefix.size(), suffix_size - 1);
+                if (current_date <= cutoff_date)
+                {
+                    details::os::remove_if_exists(folder + filename);
+                }
+            }
+        });
     }
 
     tm now_tm(log_clock::time_point tp)
@@ -225,24 +267,23 @@ private:
 
     // Delete the file N rotations ago.
     // Throw spdlog_ex on failure to delete the old file.
-    void delete_old_()
+    void delete_old_(log_clock::time_point current)
     {
         using details::os::filename_to_str;
         using details::os::remove_if_exists;
 
-        filename_t current_file = file_helper_.filename();
-        if (filenames_q_.full())
+        const tm cutoff = now_tm(cutoff_tp_(current));
+        const filename_t cutoff_filename = FileNameCalc::calc_filename(base_filename_, cutoff);
+        bool ok = remove_if_exists(cutoff_filename) == 0;
+        if (!ok)
         {
-            auto old_filename = std::move(filenames_q_.front());
-            filenames_q_.pop_front();
-            bool ok = remove_if_exists(old_filename) == 0;
-            if (!ok)
-            {
-                filenames_q_.push_back(std::move(current_file));
-                throw_spdlog_ex("Failed removing daily file " + filename_to_str(old_filename), errno);
-            }
+            throw_spdlog_ex("Failed removing daily file " + filename_to_str(cutoff_filename), errno);
         }
-        filenames_q_.push_back(std::move(current_file));
+    }
+
+    log_clock::time_point cutoff_tp_(log_clock::time_point current)
+    {
+        return current - std::chrono::hours(24)*max_files_;
     }
 
     filename_t base_filename_;
@@ -252,7 +293,6 @@ private:
     details::file_helper file_helper_;
     bool truncate_;
     uint16_t max_files_;
-    details::circular_q<filename_t> filenames_q_;
 };
 
 using daily_file_sink_mt = daily_file_sink<std::mutex>;

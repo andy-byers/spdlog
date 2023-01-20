@@ -40,6 +40,7 @@
 
 #else // unix
 
+#    include <dirent.h>
 #    include <fcntl.h>
 #    include <unistd.h>
 
@@ -571,6 +572,36 @@ SPDLOG_INLINE bool create_dir(const filename_t &path)
     } while (search_offset < path.size());
 
     return true;
+}
+
+SPDLOG_INLINE void iterate_dir(const filename_t &folder, const std::function<void(const filename_t &)> &callback)
+{
+#ifdef _WIN32
+    WIN32_FIND_DATAA ffd;
+
+    // Start iterating over the files in the folder directory.
+    HANDLE hFind = ::FindFirstFileA((folder + "\\*").c_str(), &ffd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do // Managed to locate and create an handle to that folder.
+        {
+            action(SPDLOG_FILENAME_T(ffd.cFileName));
+        } while (::FindNextFileA(hFind, &ffd) != 0);
+        ::FindClose(hFind);
+    }
+
+#else
+    DIR *dp = opendir(folder.c_str());
+    if (dp != nullptr)
+    {
+        struct dirent *ep = nullptr;
+        while ((ep = readdir(dp)) != nullptr)
+        {
+            callback(SPDLOG_FILENAME_T(ep->d_name));
+        }
+        (void)closedir(dp);
+    }
+#endif
 }
 
 // Return directory name from given path or empty string

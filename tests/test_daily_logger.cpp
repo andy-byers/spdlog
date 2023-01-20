@@ -181,3 +181,78 @@ TEST_CASE("daily_logger rotate", "[daily_file_sink]")
     test_rotate(days_to_run, 11, 10);
     test_rotate(days_to_run, 20, 10);
 }
+
+static void create_file(const spdlog::filename_t &filename)
+{
+    spdlog::details::file_helper helper;
+    helper.open(filename);
+    helper.close();
+}
+
+static void create_log_file(const spdlog::filename_t &basename, std::chrono::seconds offset)
+{
+    using spdlog::log_clock;
+
+    spdlog::details::file_helper helper;
+    time_t tnow = log_clock::to_time_t(log_clock::now() + offset);
+    tm now_tm = spdlog::details::os::localtime(tnow);
+    return create_file(spdlog::sinks::daily_filename_calculator::calc_filename(basename, now_tm));
+}
+
+static void test_initial_cleanup(uint16_t max_days, uint16_t expected_n_files, std::vector<uint16_t> old_log_offsets, bool prepare = true)
+{
+    using spdlog::log_clock;
+    using spdlog::details::log_msg;
+    using spdlog::sinks::daily_file_sink_st;
+
+    if (prepare)
+    {
+        prepare_logdir();
+    }
+    spdlog::filename_t basename = SPDLOG_FILENAME_T("test_logs/daily_rotate.txt");
+
+    for (auto offset: old_log_offsets)
+    {
+        create_log_file(basename, -std::chrono::seconds{24 * 3600 * offset});
+    }
+
+    // Adds the log from today (offset 0) in the constructor, if it doesn't already exist.
+    daily_file_sink_st sink{basename, 2, 30, true, max_days};
+
+    REQUIRE(count_files("test_logs") == static_cast<size_t>(expected_n_files));
+}
+
+TEST_CASE("daily_logger cleans obsolete logs", "[daily_file_sink]")
+{
+    test_initial_cleanup(1, 1, {0, 1, 2});
+    test_initial_cleanup(1, 1, {1, 2, 3});
+
+    test_initial_cleanup(1, 1, {2, 3, 4});
+    test_initial_cleanup(2, 1, {2, 3, 4});
+
+    test_initial_cleanup(2, 2, {1, 2, 3});
+    test_initial_cleanup(3, 3, {1, 2, 3});
+    test_initial_cleanup(4, 4, {1, 2, 3});
+
+    test_initial_cleanup(5, 1, {});
+    test_initial_cleanup(5, 1, {5});
+}
+
+TEST_CASE("daily_logger only removes daily logs", "[daily_file_sink]")
+{
+    using spdlog::log_clock;
+    using spdlog::details::log_msg;
+    using spdlog::sinks::daily_file_sink_st;
+
+    prepare_logdir();
+
+    const std::chrono::seconds offset(24 * 3600 * 1);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/daily_rotat.txt"), -offset);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/daily_rotate_.txt"), -offset);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/daily_rotate.Txt"), -offset);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/daily_rotate"), -offset);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/.txt"), -offset);
+    create_log_file(SPDLOG_FILENAME_T("test_logs/"), -offset);
+
+    test_initial_cleanup(3, 8, {1, 2}, false);
+}

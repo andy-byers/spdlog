@@ -105,6 +105,8 @@ SPDLOG_API filename_t dir_name(const filename_t &path);
 // Return true if succeeded or if this dir already exists.
 SPDLOG_API bool create_dir(const filename_t &path);
 
+SPDLOG_API void iterate_dir(const filename_t &folder, const std::function<void(const filename_t &)> &callback);
+
 // non thread safe, cross platform getenv/getenv_s
 // return empty string if field not found
 SPDLOG_API std::string getenv(const char *field);
